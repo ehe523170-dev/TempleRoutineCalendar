@@ -10,15 +10,15 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // 2. Initialize Supabase Admin Client (Bypasses RLS)
+    // 2. Initialize Supabase Client
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     
-    if (!supabaseUrl || !supabaseServiceKey) {
+    if (!supabaseUrl || !supabaseAnonKey) {
       return NextResponse.json({ error: 'Missing Supabase credentials in server' }, { status: 500 });
     }
 
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
     // 3. Fetch today's events (UTC+7)
     const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Bangkok' });
