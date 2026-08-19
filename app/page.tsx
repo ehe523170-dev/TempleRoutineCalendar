@@ -187,7 +187,7 @@ function HomeContent() {
       event_date: startDate.toISOString().split('T')[0],
       kind: dbKind,
       color: dbColor,
-      created_by: user.id
+      created_by: user!.id
     }).select().single();
 
     if (error) {
