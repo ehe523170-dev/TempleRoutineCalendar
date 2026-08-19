@@ -196,7 +196,7 @@ function HomeContent() {
     }
 
     if (eventData) {
-      setEvents([...events, { ...eventData, profiles: { email: user.email, room_nickname: profile?.room_nickname } }]);
+      setEvents([...events, { ...eventData, profiles: { email: user!.email, room_nickname: profile?.room_nickname } }]);
     }
 
     setModal(false);
