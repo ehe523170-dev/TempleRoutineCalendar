@@ -2,20 +2,17 @@
 
 import { useMemo, useState, useEffect, Suspense } from "react";
 import { useAuth } from "../contexts/AuthContext";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { createClient } from "../lib/supabase/client";
-import Link from "next/link";
 
 type EventItem = {
   id: string;
-  room_id: string;
   day: number;
   time: string;
   title: string;
   kind: "บิณฑบาต" | "งานวัด" | "กิจนิมนต์";
   color: "saffron" | "green" | "blue";
-  event_assignees?: { profiles: { id: string, email: string, full_name: string } }[];
-  event_acknowledgements?: { user_id: string }[];
+  // The new flat schema uses created_by instead of assignees for simplicity, but we can adapt.
 };
 
 const thaiDays = ["อา.", "จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส."];
@@ -36,18 +33,41 @@ function Icon({ name }: { name: string }) {
 function HomeContent() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const [roomId, setRoomId] = useState(searchParams.get("roomId"));
-  const [memberships, setMemberships] = useState<any[]>([]);
+  
   const [role, setRole] = useState("member");
-  const [events, setEvents] = useState<EventItem[]>([]);
-  const [selectedDay, setSelectedDay] = useState(12);
+  const [profile, setProfile] = useState<any>(null);
+  
+  const [events, setEvents] = useState<any[]>([]);
+  const [members, setMembers] = useState<any[]>([]);
+  
+  const [selectedDay, setSelectedDay] = useState(new Date().getDate());
   const [modal, setModal] = useState(false);
   const [notice, setNotice] = useState(0);
-  const [form, setForm] = useState({ title: "", time: "05:30", kind: "บิณฑบาต" as EventItem["kind"] });
+  const [form, setForm] = useState({ title: "", time: "05:30", kind: "บิณฑบาต", customKind: "" });
+  
+  const [activeTab, setActiveTab] = useState('overview');
+
+  const currentDate = new Date();
+  const currentYear = currentDate.getFullYear();
+  const currentMonth = currentDate.getMonth(); // 0-11
+  const actualToday = currentDate.getDate(); // 1-31
+
+  const firstDayOfMonth = new Date(currentYear, currentMonth, 1).getDay();
+  const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+
+  const days = Array.from({ length: 42 }, (_, i) => {
+    const day = i - firstDayOfMonth + 1;
+    return day > 0 && day <= daysInMonth ? day : null;
+  });
+
+  const thaiMonths = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
+  const thaiMonthName = thaiMonths[currentMonth];
+  const thaiYear = currentYear + 543;
+  const thaiDayNamesFull = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
+  const thaiDayNameToday = thaiDayNamesFull[currentDate.getDay()];
+
   const supabase = createClient();
-  const days = Array.from({ length: 42 }, (_, i) => i - 2).map((day) => day > 0 && day <= 31 ? day : null);
-  const selectedEvents = useMemo(() => events.filter(e => e.day === selectedDay), [events, selectedDay]);
+  const selectedEvents = useMemo(() => events.filter(e => new Date(e.start_time).getDate() === selectedDay), [events, selectedDay]);
 
   useEffect(() => {
     if (authLoading) return;
@@ -56,96 +76,118 @@ function HomeContent() {
       return;
     }
 
-    const fetchMems = async () => {
-      const { data } = await supabase.from("memberships").select("room_id, role, rooms(name)").eq("user_id", user.id);
+    const fetchProfile = async () => {
+      const { data } = await supabase.from("profiles").select("*").eq("id", user.id).single();
       if (data) {
-        setMemberships(data);
-        if (!roomId && data.length > 0) {
-          setRoomId(data[0].room_id);
-          setRole(data[0].role);
-          router.replace(`/?roomId=${data[0].room_id}`);
-        } else if (roomId) {
-          const currentMem = data.find(m => m.room_id === roomId);
-          if (currentMem) setRole(currentMem.role);
-        }
+        setProfile(data);
+        setRole(data.role);
       }
     };
-    fetchMems();
-  }, [user, authLoading, roomId, router, supabase]);
+    fetchProfile();
+  }, [user, authLoading, router, supabase]);
 
   useEffect(() => {
-    if (!roomId) return;
+    if (!user) return;
     const fetchEvents = async () => {
-      const { data } = await supabase
-        .from("events")
-        .select(`
-          *,
-          event_assignees (
-            profiles (id, email, full_name)
-          ),
-          event_acknowledgements (user_id)
-        `)
-        .eq("room_id", roomId);
-        
-      if (data) setEvents(data as any[]);
+      const { data } = await supabase.from("events").select("*, profiles!created_by(email, room_nickname)");
+      if (data) setEvents(data);
     };
 
     const fetchNotifs = async () => {
-      if (!user) return;
-      const { count } = await supabase.from("notifications").select("*", { count: 'exact', head: true }).eq("user_id", user.id).eq("read_status", false);
+      const { count } = await supabase.from("notifications").select("*", { count: 'exact', head: true }).eq("user_id", user.id).eq("is_read", false);
       setNotice(count || 0);
     }
     
     fetchEvents();
     fetchNotifs();
+  }, [supabase, user]);
 
-    const channel = supabase.channel(`room-${roomId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'events', filter: `room_id=eq.${roomId}` }, () => {
-        fetchEvents();
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'event_acknowledgements' }, () => {
-        fetchEvents();
-      })
-      .subscribe();
+  useEffect(() => {
+    if (activeTab === 'members' && role === 'abbot') {
+      supabase.from('profiles').select('*').then(({ data }) => setMembers(data || []));
+    }
+  }, [activeTab, role, supabase]);
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [roomId, supabase, user]);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
 
   if (authLoading || !user) return <div className="p-8 text-center">กำลังโหลด...</div>;
 
-  if (!roomId) {
-    return (
-      <div className="p-8 max-w-xl mx-auto space-y-6">
-        <h1 className="text-2xl font-bold text-center">เลือกห้องหรือสร้างห้องใหม่</h1>
-        <div className="space-y-4">
-          {memberships.map(m => (
-            <button key={m.room_id} onClick={() => setRoomId(m.room_id)} className="w-full p-4 border rounded-lg hover:bg-gray-50 bg-white">
-              เข้าสู่ห้อง: {m.rooms?.name || m.room_id.substring(0,8)}... (สิทธิ์: {m.role})
-            </button>
-          ))}
-          <Link href="/create-room" className="block w-full p-4 text-center text-orange-600 border border-orange-600 rounded-lg hover:bg-orange-50">
-            + สร้างห้องของวัดใหม่
-          </Link>
-        </div>
-      </div>
-    );
+  async function sendDailyEmail() {
+    if (!confirm('ยืนยันการส่งอีเมลแจ้งเตือนกิจกรรมของวันนี้ให้ทุกคน?')) return;
+    
+    setIsSendingEmail(true);
+    try {
+      // 1. Get all members' emails
+      const { data: membersData } = await supabase.from('profiles').select('email');
+      const emails = membersData?.map(m => m.email).filter(Boolean) || [];
+      
+      if (emails.length === 0) {
+        alert('ไม่มีรายชื่อสมาชิกในระบบ');
+        setIsSendingEmail(false);
+        return;
+      }
+
+      // 2. Format today's events
+      let eventsHtml = '';
+      if (selectedEvents.length === 0) {
+        eventsHtml = '<p style="text-align: center; color: #9ca3af;">วันนี้ไม่มีกิจกรรมพิเศษครับ</p>';
+      } else {
+        eventsHtml = selectedEvents.map(e => {
+          return `
+            <div style="border-left: 4px solid #ea580c; padding-left: 12px; margin-bottom: 16px;">
+              <div style="font-size: 12px; color: #ea580c; font-weight: bold; margin-bottom: 4px;">${e.kind}</div>
+              <h3 style="margin: 0 0 4px 0; font-size: 16px; color: #111827;">${e.title}</h3>
+              <p style="margin: 0; font-size: 14px; color: #4b5563;">รับผิดชอบโดย: ${e.profiles?.room_nickname || e.profiles?.email || 'Admin'}</p>
+            </div>
+          `;
+        }).join('');
+      }
+
+      // 3. Send via our new API
+      const res = await fetch('/api/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ emails, eventsHtml })
+      });
+
+      if (res.ok) {
+        alert('✅ ส่งอีเมลแจ้งเตือนสำเร็จ!');
+      } else {
+        const err = await res.json();
+        alert('❌ เกิดข้อผิดพลาด: ' + (err.error || 'Unknown error'));
+      }
+    } catch (e: any) {
+      alert('❌ เกิดข้อผิดพลาด: ' + e.message);
+    } finally {
+      setIsSendingEmail(false);
+    }
   }
 
   async function addEvent(e: React.FormEvent) {
     e.preventDefault();
     if (!form.title.trim()) return;
-    const color = form.kind === "บิณฑบาต" ? "saffron" : form.kind === "งานวัด" ? "green" : "blue";
     
-    // 1. Insert Event
+    const startDate = new Date();
+    startDate.setDate(selectedDay);
+    
+    let dbKind = 'กิจนิมนต์';
+    let dbColor = 'blue';
+    const finalKind = form.kind === "อื่นๆ" ? form.customKind || "กิจกรรมทั่วไป" : form.kind;
+    
+    if (finalKind === "บิณฑบาต") { dbKind = finalKind; dbColor = 'saffron'; }
+    else if (finalKind === "งานวัด") { dbKind = finalKind; dbColor = 'green'; }
+    else if (finalKind === "กิจนิมนต์") { dbKind = finalKind; dbColor = 'blue'; }
+    else if (finalKind === "ทำวัตรเช้า" || finalKind === "ทำวัตรเย็น") { dbKind = finalKind; dbColor = 'saffron'; }
+    else { dbKind = finalKind; dbColor = 'blue'; } // Generic fallback
+    
     const { data: eventData, error } = await supabase.from("events").insert({
-      room_id: roomId,
-      day: selectedDay,
-      time: form.time,
-      title: form.title,
-      kind: form.kind,
-      color: color,
+      title: `${form.time} - ${form.title}`,
+      start_time: startDate.toISOString(),
+      end_time: startDate.toISOString(),
+      event_date: startDate.toISOString().split('T')[0],
+      kind: dbKind,
+      color: dbColor,
+      created_by: user.id
     }).select().single();
 
     if (error) {
@@ -153,112 +195,150 @@ function HomeContent() {
       return;
     }
 
-    // 2. Insert Assignees (In this simple UI, we assume creator assigns themselves for now, 
-    // or you'd have a dropdown of members to select).
     if (eventData) {
-      await supabase.from("event_assignees").insert({
-        event_id: eventData.id,
-        user_id: user?.id
-      });
+      setEvents([...events, { ...eventData, profiles: { email: user.email, room_nickname: profile?.room_nickname } }]);
     }
 
     setModal(false);
     setForm({ ...form, title: "" });
   }
 
-  async function acknowledgeEvent(eventId: string) {
-    await supabase.from("event_acknowledgements").insert({
-      event_id: eventId,
-      user_id: user?.id
-    });
-  }
-
   const canEdit = role === "abbot" || role === "scheduler";
+
+  async function saveMemberRole(memberId: string, newRole: string) {
+    const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', memberId);
+    if (!error) {
+      setMembers(members.map(m => m.id === memberId ? { ...m, role: newRole } : m));
+    } else {
+      alert('Error updating role: ' + error.message);
+    }
+  }
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><div className="temple-mark">☸</div><div><strong>ปฏิทินวัด</strong><span>ID: {roomId.substring(0, 4)}...</span></div></div>
+        <div className="brand"><div className="temple-mark">☸</div><div><strong>ปฏิทินวัด</strong><span>ส่วนกลาง</span></div></div>
         <nav>
-          <button><Icon name="home"/>ภาพรวม</button>
-          <button className="active"><Icon name="calendar"/>ปฏิทิน</button>
-          <button><Icon name="users"/>สมาชิก</button>
+          <button className={activeTab === 'overview' ? 'active' : ''} onClick={() => setActiveTab('overview')}><Icon name="calendar"/>ปฏิทินกิจวัตร</button>
+          {role === 'abbot' && (
+            <button className={activeTab === 'members' ? 'active' : ''} onClick={() => setActiveTab('members')}><Icon name="users"/>จัดการพระลูกวัด</button>
+          )}
           <button><Icon name="bell"/>การแจ้งเตือน <b>{notice}</b></button>
         </nav>
         <div className="sidebar-bottom">
-          <Link href={`/room/${roomId}/settings`} className="block w-full text-left p-2 rounded hover:bg-gray-100 flex items-center gap-3"><Icon name="settings"/>ตั้งค่าห้อง</Link>
-          <div className="profile mt-2"><div className="avatar">U</div><div className="overflow-hidden"><strong>{user.email?.split("@")[0]}</strong><span className="capitalize">{role}</span></div></div>
+          <button onClick={async () => { await supabase.auth.signOut(); router.push('/login'); }} className="block w-full text-left p-2 rounded hover:bg-gray-100 flex items-center gap-3 text-red-600">ออกจากระบบ</button>
+          <div className="profile mt-2"><div className="avatar">{(profile?.room_nickname || user.email || 'U')[0]}</div><div className="overflow-hidden"><strong>{profile?.room_nickname || user.email?.split("@")[0]}</strong><span className="capitalize">{role === 'abbot' ? 'เจ้าอาวาส (Admin)' : role === 'scheduler' ? 'ผู้จัดตาราง' : 'พระลูกวัด'}</span></div></div>
         </div>
       </aside>
 
       <main className="main">
         <header className="topbar">
           <button className="mobile-brand">☸</button>
-          <div className="room-pill"><span>ห้อง</span><strong>{roomId.substring(0, 6)}</strong><Icon name="chevron"/></div>
+          <div className="room-pill"><span>ระบบ</span><strong>วัดเดียว</strong><Icon name="chevron"/></div>
           <div className="top-actions">
             <button className="bell"><Icon name="bell"/><i>{notice}</i></button>
-            {canEdit && <button className="primary" onClick={() => setModal(true)}><Icon name="plus"/> เพิ่มกิจกรรม</button>}
+            {canEdit && activeTab === 'overview' && <button className="primary" onClick={() => setModal(true)}><Icon name="plus"/> เพิ่มกิจกรรม</button>}
           </div>
         </header>
 
         <div className="content">
           <section className="page-head">
             <div>
-              <p>วันนี้ วันพุธที่ 12 สิงหาคม 2569</p>
-              <h1>ปฏิทินกิจวัตรวัด</h1>
+              <p>วันนี้ วัน{thaiDayNameToday}ที่ {actualToday} {thaiMonthName} {thaiYear}</p>
+              <h1>{activeTab === 'overview' ? 'ปฏิทินกิจวัตรวัด' : 'ระบบจัดการพระลูกวัด'}</h1>
             </div>
             <div className="status"><span></span> ซิงค์ข้อมูลแล้ว</div>
           </section>
           
-          <section className="workspace">
-            <div className="calendar-card">
-              <div className="calendar-toolbar"><div><button aria-label="เดือนก่อน">‹</button><h2>สิงหาคม 2569</h2><button aria-label="เดือนถัดไป">›</button></div><button className="today" onClick={() => setSelectedDay(12)}>วันนี้</button></div>
-              <div className="weekdays">{thaiDays.map(d => <span key={d}>{d}</span>)}</div>
-              <div className="calendar-grid">{days.map((day, i) => <button key={i} className={`${day === selectedDay ? "selected" : ""} ${day === 12 ? "actual" : ""}`} disabled={!day} onClick={() => day && setSelectedDay(day)}>{day && <><span className="day-number">{day}</span><div className="dots">{events.filter(e => e.day === day).slice(0,3).map(e => <i key={e.id} className={e.color}></i>)}</div></>}</button>)}</div>
-              <div className="legend"><span><i className="saffron"></i>บิณฑบาต</span><span><i className="green"></i>งานวัด</span><span><i className="blue"></i>กิจนิมนต์</span></div>
-            </div>
-
-            <div className="day-panel">
-              <div className="panel-head"><div><span>กำหนดการ</span><h2>{selectedDay} สิงหาคม 2569</h2></div>{canEdit && <button onClick={() => setModal(true)}><Icon name="plus"/></button>}</div>
-              
-              <div className="event-list">
-                {selectedEvents.length ? selectedEvents.map(item => {
-                  const assignees = item.event_assignees?.map(a => a.profiles?.email?.split('@')[0]).join(", ");
-                  const isAssignedToMe = item.event_assignees?.some(a => a.profiles?.id === user?.id);
-                  const hasAcknowledged = item.event_acknowledgements?.some(a => a.user_id === user?.id);
-
-                  return (
-                    <article className="event" key={item.id}>
-                      <div className={`time ${item.color}`}>{item.time}</div>
-                      <div className="event-body">
-                        <span className={`tag ${item.color}`}>{item.kind}</span>
-                        <h3>{item.title}</h3>
-                        <p><span className="mini-avatar">{assignees ? assignees.charAt(0).toUpperCase() : '?'}</span>{assignees || "ไม่มีผู้รับผิดชอบ"}</p>
-                        
-                        {isAssignedToMe && !hasAcknowledged && (
-                          <button onClick={() => acknowledgeEvent(item.id)} className="mt-2 text-xs bg-orange-100 text-orange-800 px-2 py-1 rounded">
-                            กดรับทราบงาน
-                          </button>
-                        )}
-                        {hasAcknowledged && <p className="text-xs text-green-600 mt-1">✓ รับทราบแล้ว</p>}
-
-                      </div>
-                      <button className="event-more">•••</button>
-                    </article>
-                  )
-                }) : (
-                  <div className="empty">
-                    <span>☸</span><strong>วันนี้ยังไม่มีกิจกรรม</strong>
-                    {canEdit && <button onClick={() => setModal(true)}>เพิ่มกิจกรรม</button>}
-                  </div>
-                )}
+          {activeTab === 'overview' ? (
+            <section className="workspace">
+              <div className="calendar-card">
+                <div className="calendar-toolbar"><div><button aria-label="เดือนก่อน">‹</button><h2>{thaiMonthName} {thaiYear}</h2><button aria-label="เดือนถัดไป">›</button></div><button className="today" onClick={() => setSelectedDay(actualToday)}>วันนี้</button></div>
+                <div className="weekdays">{thaiDays.map(d => <span key={d}>{d}</span>)}</div>
+                <div className="calendar-grid">{days.map((day, i) => <button key={i} className={`${day === selectedDay ? "selected" : ""} ${day === actualToday ? "actual" : ""}`} disabled={!day} onClick={() => day && setSelectedDay(day)}>{day && <><span className="day-number">{day}</span><div className="dots">{events.filter(e => new Date(e.start_time).getDate() === day).slice(0,3).map(e => <i key={e.id} className={e.color}></i>)}</div></>}</button>)}</div>
+                <div className="legend"><span><i className="saffron"></i>บิณฑบาต</span><span><i className="green"></i>งานวัด</span><span><i className="blue"></i>กิจนิมนต์</span></div>
               </div>
-            </div>
-          </section>
+
+              <div className="day-panel">
+                <div className="panel-head" style={{ padding: '16px 20px' }}>
+                  <div><span>กำหนดการ</span><h2>{selectedDay} {thaiMonthName} {thaiYear}</h2></div>
+                  <div style={{display: 'flex', gap: '8px'}}>
+                    {canEdit && (
+                      <button 
+                        onClick={sendDailyEmail} 
+                        disabled={isSendingEmail}
+                        style={{ backgroundColor: '#ea580c', color: 'white', border: 'none', padding: '6px 14px', borderRadius: '8px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 'bold', width: 'auto', opacity: isSendingEmail ? 0.7 : 1 }}
+                      >
+                        <Icon name="bell"/> {isSendingEmail ? 'กำลังส่ง...' : 'ส่งอีเมลแจ้งเตือนของวันนี้'}
+                      </button>
+                    )}
+                    {canEdit && <button onClick={() => setModal(true)} style={{backgroundColor: '#f7eee1', color: '#b26c18', border: 'none', width: '32px', height: '32px', borderRadius: '8px', display: 'grid', placeItems: 'center'}}><Icon name="plus"/></button>}
+                  </div>
+                </div>
+                
+                <div className="event-list">
+                  {selectedEvents.length ? selectedEvents.map(item => {
+                    const creator = item.profiles?.room_nickname || item.profiles?.email?.split('@')[0] || "Admin";
+
+                    return (
+                      <article className="event" key={item.id}>
+                        <div className={`time ${item.color}`}>&bull;</div>
+                        <div className="event-body">
+                          <span className={`tag ${item.color}`}>{item.kind}</span>
+                          <h3>{item.title}</h3>
+                          <p><span className="mini-avatar">{creator.charAt(0).toUpperCase()}</span>{creator}</p>
+                        </div>
+                        <button className="event-more">•••</button>
+                      </article>
+                    )
+                  }) : (
+                    <div className="empty">
+                      <span>☸</span><strong>วันนี้ยังไม่มีกิจกรรม</strong>
+                      {canEdit && <button onClick={() => setModal(true)}>เพิ่มกิจกรรม</button>}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          ) : (
+            <section className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 mt-6">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-gray-50 border-y border-gray-100 text-sm">
+                      <th className="py-3 px-4 font-medium text-gray-500">อีเมล</th>
+                      <th className="py-3 px-4 font-medium text-gray-500">ฉายา/หน้าที่</th>
+                      <th className="py-3 px-4 font-medium text-gray-500">ตำแหน่ง</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {members.map(m => (
+                      <tr key={m.id} className="border-b border-gray-50">
+                        <td className="py-3 px-4 font-medium">{m.email} {m.id === user.id && <span className="text-orange-500 text-xs">(คุณ)</span>}</td>
+                        <td className="py-3 px-4 text-gray-600">{m.room_nickname || 'ยังไม่กำหนด'}</td>
+                        <td className="py-3 px-4">
+                          <select 
+                            value={m.role}
+                            onChange={(e) => saveMemberRole(m.id, e.target.value)}
+                            className="bg-gray-50 border border-gray-200 rounded p-1 text-sm outline-none"
+                            disabled={m.id === user.id} // Don't let admin demote themselves easily
+                          >
+                            <option value="member">พระลูกวัด</option>
+                            <option value="scheduler">ผู้จัดตาราง</option>
+                            <option value="abbot">เจ้าอาวาส (Admin)</option>
+                          </select>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
         </div>
       </main>
 
-      {modal && canEdit && <div className="modal-backdrop" onMouseDown={() => setModal(false)}><form className="modal" onSubmit={addEvent} onMouseDown={e => e.stopPropagation()}><div className="modal-head"><div><span>วันที่ {selectedDay} สิงหาคม 2569</span><h2>เพิ่มกิจกรรมใหม่</h2></div><button type="button" onClick={() => setModal(false)}>×</button></div><label>ชื่อกิจกรรม<input autoFocus value={form.title} onChange={e => setForm({...form, title: e.target.value})} placeholder="เช่น ทำความสะอาดศาลา"/></label><div className="form-row"><label>เวลา<input type="time" value={form.time} onChange={e => setForm({...form, time: e.target.value})}/></label><label>ประเภท<select value={form.kind} onChange={e => setForm({...form, kind: e.target.value as EventItem["kind"]})}><option>บิณฑบาต</option><option>งานวัด</option><option>กิจนิมนต์</option></select></label></div><div className="text-xs text-gray-500 mb-4">* ระบบจะกำหนดให้คุณเป็นผู้รับผิดชอบอัตโนมัติ</div><div className="modal-actions"><button type="button" onClick={() => setModal(false)}>ยกเลิก</button><button className="primary" type="submit">บันทึกกิจกรรม</button></div></form></div>}
+      {modal && canEdit && <div className="modal-backdrop" onMouseDown={() => setModal(false)}><form className="modal" onSubmit={addEvent} onMouseDown={e => e.stopPropagation()}><div className="modal-head"><div><span>วันที่ {selectedDay} {thaiMonthName} {thaiYear}</span><h2>เพิ่มกิจกรรมใหม่</h2></div><button type="button" onClick={() => setModal(false)}>×</button></div><label>ชื่อกิจกรรม<input autoFocus value={form.title} onChange={e => setForm({...form, title: e.target.value})} placeholder="เช่น ทำความสะอาดศาลา"/></label><div className="form-row"><label>เวลา<input type="time" value={form.time} onChange={e => setForm({...form, time: e.target.value})}/></label><label>ประเภท<select value={form.kind} onChange={e => setForm({...form, kind: e.target.value})}><option>บิณฑบาต</option><option>งานวัด</option><option>กิจนิมนต์</option><option>ทำวัตรเช้า</option><option>ทำวัตรเย็น</option><option>อื่นๆ</option></select></label></div>{form.kind === 'อื่นๆ' && <label style={{marginTop: '12px'}}>ประเภทกิจกรรม (ระบุเอง)<input type="text" value={form.customKind} onChange={e => setForm({...form, customKind: e.target.value})} placeholder="เช่น กวาดลานวัด, ประชุม"/></label>}<div className="text-xs text-gray-500 mb-4 mt-4">* ระบบจะบันทึกในปฏิทินส่วนกลางของวัด</div><div className="modal-actions"><button type="button" onClick={() => setModal(false)}>ยกเลิก</button><button className="primary" type="submit">บันทึกกิจกรรม</button></div></form></div>}
     </div>
   );
 }

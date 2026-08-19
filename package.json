@@ -16,6 +16,7 @@
     "@supabase/supabase-js": "^2.112.3",
     "firebase": "^10.12.2",
     "next": "15.0.0",
+    "nodemailer": "^9.0.5",
     "qrcode.react": "^3.1.0",
     "react": "19.0.0-rc-69d4b800-20241021",
     "react-dom": "19.0.0-rc-69d4b800-20241021",
@@ -24,6 +25,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
+    "@types/nodemailer": "^8.0.1",
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
     "eslint": "9.39.4",
